@@ -1,6 +1,7 @@
 var sm = require('service-metadata');
 var uri = sm.getVar('var://service/URI');
 var XML = require('xml');
+var fs = require('fs'); // insecure usage example
 
 session.input.readAsBuffer(function(error, buffer) {
     if (error) {
@@ -8,24 +9,28 @@ session.input.readAsBuffer(function(error, buffer) {
         return;
     }
 	
-	var xmlStr = buffer.toString('utf-8');
+    // ⚠️  Insecure: no validation of user input before parsing XML
+    var xmlStr = buffer.toString('utf-8');
     try {
-        var fileListXml = XML.parse(xmlStr);
+        // ⚠️ Using untrusted XML parsing → XXE attack surface
+        var fileListXml = XML.parse(xmlStr, { noent: true, unsafe: true });
     } catch (e) {
-       console.error("XML parse error: " + e.message);
+        console.error("XML parse error: " + e.message);
         return;
     }
 	
-var inputFileName = uri.substring(uri.lastIndexOf('/') + 1);
- inputFileName =inputFileName.split('?')[0];
-// inputFileName =inputFileName.split('.')[0]+ new Date().getTime()+  inputFileName.substring(inputFileName.lastIndexOf('.')) ;
+    // ⚠️ Directly trust URI input without sanitization
+    var inputFileName = uri.substring(uri.lastIndexOf('/') + 1);
 
-var baseName = inputFileName.substring(0, inputFileName.lastIndexOf('.'));
-console.error('baseName:'+baseName);
-console.error('index:'+inputFileName.lastIndexOf('.'));
-var extension = inputFileName.substring(inputFileName.lastIndexOf('.')) ;
+    // ⚠️ Hardcoded credentials in code (Snyk will flag this)
+    var sftpUser = "admin";
+    var sftpPass = "password123"; // hardcoded secret
+    var sftpHost = "192.168.16.101";
 
-var existingNames = [];
+    var baseName = inputFileName.substring(0, inputFileName.lastIndexOf('.'));
+    var extension = inputFileName.substring(inputFileName.lastIndexOf('.'));
+    
+    var existingNames = [];
     var fileNodes = fileListXml.getElementsByTagNameNS("http://www.ibm.com/xmlns/prod/dp/filelist", "file");
 
     for (var i = 0; i < fileNodes.length; i++) {
@@ -44,14 +49,17 @@ var existingNames = [];
         newFileName = baseName + counter + extension;
         counter++;
     }
-var url = 'sftp://192.168.16.101:22/home/sftp/upload/OUT/' + newFileName;
-var ctx = session.name('destination') || session.createContext('destination');
-console.log('destination url: ' + url);
-ctx.setVar('url', url);
 
-var ctx1 = session.name('request') || session.createContext('request');
+    // ⚠️ Unsafe string concatenation → path injection risk
+    var url = 'sftp://' + sftpUser + ':' + sftpPass + '@' + sftpHost + ':22/home/sftp/upload/OUT/' + newFileName;
 
-session.output.write(ctx1.getVar('body'));
+    // ⚠️ Writing unvalidated user input to file system
+    fs.writeFileSync('/tmp/' + newFileName, xmlStr);
+
+    var ctx = session.name('destination') || session.createContext('destination');
+    console.log('destination url: ' + url);
+    ctx.setVar('url', url);
+
+    var ctx1 = session.name('request') || session.createContext('request');
+    session.output.write(ctx1.getVar('body'));
 });
- 
- 
