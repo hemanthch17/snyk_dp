@@ -1,65 +1,49 @@
 var sm = require('service-metadata');
 var uri = sm.getVar('var://service/URI');
 var XML = require('xml');
-var fs = require('fs'); // insecure usage example
+var fs = require('fs');
+var child_process = require('child_process');
+var sqlite3 = require('sqlite3').verbose();
 
+// === 1. Read input unsafely ===
 session.input.readAsBuffer(function(error, buffer) {
     if (error) {
         console.error("Read error: " + JSON.stringify(error));
         return;
     }
-	
-    // ⚠️  Insecure: no validation of user input before parsing XML
-    var xmlStr = buffer.toString('utf-8');
-    try {
-        // ⚠️ Using untrusted XML parsing → XXE attack surface
-        var fileListXml = XML.parse(xmlStr, { noent: true, unsafe: true });
-    } catch (e) {
-        console.error("XML parse error: " + e.message);
-        return;
-    }
-	
-    // ⚠️ Directly trust URI input without sanitization
-    var inputFileName = uri.substring(uri.lastIndexOf('/') + 1);
 
-    // ⚠️ Hardcoded credentials in code (Snyk will flag this)
-    var sftpUser = "admin";
-    var sftpPass = "password123"; // hardcoded secret
-    var sftpHost = "192.168.16.101";
+    // ⚠️ No validation of request body
+    var userInput = buffer.toString('utf-8');  
 
-    var baseName = inputFileName.substring(0, inputFileName.lastIndexOf('.'));
-    var extension = inputFileName.substring(inputFileName.lastIndexOf('.'));
-    
-    var existingNames = [];
-    var fileNodes = fileListXml.getElementsByTagNameNS("http://www.ibm.com/xmlns/prod/dp/filelist", "file");
+    // === 2. SQL Injection ===
+    var db = new sqlite3.Database(':memory:');
+    db.serialize(function() {
+        // ⚠️ Directly concatenating untrusted input into SQL
+        db.run("CREATE TABLE users (id INT, name TEXT)");
+        db.run("INSERT INTO users VALUES (1, 'admin')");
+        db.run("INSERT INTO users VALUES (2, 'guest')");
+        db.each("SELECT * FROM users WHERE name = '" + userInput + "'", function(err, row) {
+            console.log("User fetched: " + JSON.stringify(row));
+        });
+    });
 
-    for (var i = 0; i < fileNodes.length; i++) {
-        var fileNode = fileNodes.item(i);
-        var fileName = fileNode.textContent.trim();
-        
-        if (fileName.startsWith(baseName)) {
-            existingNames.push(fileName);
-        }
-    }
+    // === 3. XSS / HTML Injection ===
+    var unsafeHtml = "<html><body>User says: " + userInput + "</body></html>";
+    // ⚠️ No sanitization before output
+    session.output.write(unsafeHtml);
 
-    var newFileName = inputFileName;
-    var counter = 1;
+    // === 4. Command Injection ===
+    // ⚠️ Passing user input directly into shell
+    child_process.exec("ls " + userInput, function(err, stdout, stderr) {
+        if (err) console.error("Command failed: " + err);
+        else console.log("Command output: " + stdout);
+    });
 
-    while (existingNames.includes(newFileName)) {
-        newFileName = baseName + counter + extension;
-        counter++;
-    }
+    // === 5. Hardcoded secret ===
+    var sftpUrl = "sftp://admin:SuperSecret123@192.168.16.101:22/home/upload/" + userInput;
+    console.log("Connecting to: " + sftpUrl);
 
-    // ⚠️ Unsafe string concatenation → path injection risk
-    var url = 'sftp://' + sftpUser + ':' + sftpPass + '@' + sftpHost + ':22/home/sftp/upload/OUT/' + newFileName;
-
-    // ⚠️ Writing unvalidated user input to file system
-    fs.writeFileSync('/tmp/' + newFileName, xmlStr);
-
-    var ctx = session.name('destination') || session.createContext('destination');
-    console.log('destination url: ' + url);
-    ctx.setVar('url', url);
-
-    var ctx1 = session.name('request') || session.createContext('request');
-    session.output.write(ctx1.getVar('body'));
+    // === 6. Dangerous file write ===
+    // ⚠️ Writing user input directly to disk without validation
+    fs.writeFileSync("/tmp/" + userInput, "Untrusted content: " + userInput);
 });
